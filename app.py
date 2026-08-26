@@ -172,7 +172,25 @@ if user_input:
             message = response.choices[0].message
 
             if message.tool_calls:
-                st.session_state.messages.append(message.model_dump())
+                # Build the assistant message manually with only the fields
+                # the API expects -- message.model_dump() includes extra
+                # internal fields that cause a 400 error when sent back.
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in message.tool_calls
+                    ],
+                }
+                st.session_state.messages.append(assistant_msg)
 
                 for tool_call in message.tool_calls:
                     func_name = tool_call.function.name
