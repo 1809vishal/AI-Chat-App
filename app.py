@@ -26,7 +26,7 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from ddgs import DDGS
 
-CHAT_MODEL = "llama-3.1-8b-instant"  # fast + generous free-tier limits
+CHAT_MODEL = "openai/gpt-oss-20b"  # llama-3.1-8b-instant was deprecated by Groq
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"  # small, free, runs in-process
 DOCS_FOLDER = "policies"
 TOP_K = 2
