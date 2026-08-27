@@ -224,14 +224,21 @@ if user_input:
                         if not function_to_call:
                             result = f"Unknown function: {func_name}"
                         else:
-                            try:
-                                result = function_to_call(**func_args)
-                            except TypeError:
-                                fallback_value = (
-                                    func_args.get("query")
-                                    or next(iter(func_args.values()), "")
+                            query_value = func_args.get("query", "").strip() if isinstance(func_args, dict) else ""
+
+                            if not query_value:
+                                # The model's arguments were empty/unusable.
+                                # Don't silently search with a blank query --
+                                # that returns irrelevant/random results.
+                                result = (
+                                    "No usable search query was provided by the model "
+                                    "for this request."
                                 )
-                                result = function_to_call(str(fallback_value))
+                            else:
+                                try:
+                                    result = function_to_call(query_value)
+                                except Exception as e:
+                                    result = f"Tool execution failed: {e}"
 
                         st.session_state.messages.append({
                             "role": "tool",
@@ -252,8 +259,8 @@ if user_input:
                         # Show the raw results directly rather than crashing.
                         last_tool_result = st.session_state.messages[-1]["content"]
                         final_text = (
-                            "I found this information, but had trouble "
-                            f"summarizing it:\n\n{last_tool_result}"
+                            "I ran into trouble putting together a clean answer. "
+                            f"Here's what I found:\n\n{last_tool_result}"
                         )
                 else:
                     final_text = message.content
