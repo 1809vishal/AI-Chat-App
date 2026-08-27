@@ -26,7 +26,7 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from ddgs import DDGS
 
-CHAT_MODEL = "openai/gpt-oss-20b"  # llama-3.1-8b-instant was deprecated by Groq
+CHAT_MODEL = "openai/gpt-oss-120b"  # larger model = more reliable tool calling than the 20b version
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"  # small, free, runs in-process
 DOCS_FOLDER = "policies"
 TOP_K = 2
@@ -163,70 +163,100 @@ if user_input:
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            response = groq_client.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=st.session_state.messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
-            message = response.choices[0].message
+            final_text = None
 
-            if message.tool_calls:
-                # Build the assistant message manually with only the fields
-                # the API expects -- message.model_dump() includes extra
-                # internal fields that cause a 400 error when sent back.
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": message.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in message.tool_calls
-                    ],
-                }
-                st.session_state.messages.append(assistant_msg)
-
-                for tool_call in message.tool_calls:
-                    func_name = tool_call.function.name
-                    import json
-                    func_args = json.loads(tool_call.function.arguments)
-                    st.caption(f"🔧 Using tool: {func_name}({func_args})")
-
-                    function_to_call = available_functions.get(func_name)
-                    if not function_to_call:
-                        result = f"Unknown function: {func_name}"
-                    else:
-                        try:
-                            result = function_to_call(**func_args)
-                        except TypeError:
-                            # The model sometimes sends a slightly different
-                            # argument shape than expected (e.g. a different
-                            # key name). Fall back to using whatever single
-                            # value it provided as the query.
-                            fallback_value = (
-                                func_args.get("query")
-                                or next(iter(func_args.values()), "")
-                            )
-                            result = function_to_call(str(fallback_value))
-                    st.session_state.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result,
-                    })
-
-                final_response = groq_client.chat.completions.create(
+            # --- First call: let the model decide if it needs a tool ---
+            try:
+                response = groq_client.chat.completions.create(
                     model=CHAT_MODEL,
                     messages=st.session_state.messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
                 )
-                final_text = final_response.choices[0].message.content
-            else:
-                final_text = message.content
+                message = response.choices[0].message
+            except Exception:
+                # The model failed to generate a valid response/tool call.
+                # Retry once WITHOUT tools so the user still gets an answer
+                # instead of a crash.
+                try:
+                    fallback_response = groq_client.chat.completions.create(
+                        model=CHAT_MODEL,
+                        messages=st.session_state.messages,
+                    )
+                    final_text = fallback_response.choices[0].message.content
+                except Exception:
+                    final_text = (
+                        "Sorry, I ran into an issue processing that. "
+                        "Could you try rephrasing your question?"
+                    )
+                message = None
+
+            # --- If the first call succeeded, handle tool calls (if any) ---
+            if message is not None:
+                if message.tool_calls:
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": message.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in message.tool_calls
+                        ],
+                    }
+                    st.session_state.messages.append(assistant_msg)
+
+                    for tool_call in message.tool_calls:
+                        func_name = tool_call.function.name
+                        import json
+                        try:
+                            func_args = json.loads(tool_call.function.arguments)
+                        except json.JSONDecodeError:
+                            func_args = {}
+                        st.caption(f"🔧 Using tool: {func_name}({func_args})")
+
+                        function_to_call = available_functions.get(func_name)
+                        if not function_to_call:
+                            result = f"Unknown function: {func_name}"
+                        else:
+                            try:
+                                result = function_to_call(**func_args)
+                            except TypeError:
+                                fallback_value = (
+                                    func_args.get("query")
+                                    or next(iter(func_args.values()), "")
+                                )
+                                result = function_to_call(str(fallback_value))
+
+                        st.session_state.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": func_name,
+                            "content": result,
+                        })
+
+                    # --- Second call: model writes the final answer ---
+                    try:
+                        final_response = groq_client.chat.completions.create(
+                            model=CHAT_MODEL,
+                            messages=st.session_state.messages,
+                        )
+                        final_text = final_response.choices[0].message.content
+                    except Exception:
+                        # The model failed to summarize the tool results.
+                        # Show the raw results directly rather than crashing.
+                        last_tool_result = st.session_state.messages[-1]["content"]
+                        final_text = (
+                            "I found this information, but had trouble "
+                            f"summarizing it:\n\n{last_tool_result}"
+                        )
+                else:
+                    final_text = message.content
 
             st.markdown(final_text)
             st.session_state.messages.append({"role": "assistant", "content": final_text})
