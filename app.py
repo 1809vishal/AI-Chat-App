@@ -199,11 +199,21 @@ if user_input:
                     st.caption(f"🔧 Using tool: {func_name}({func_args})")
 
                     function_to_call = available_functions.get(func_name)
-                    result = (
-                        function_to_call(**func_args)
-                        if function_to_call
-                        else f"Unknown function: {func_name}"
-                    )
+                    if not function_to_call:
+                        result = f"Unknown function: {func_name}"
+                    else:
+                        try:
+                            result = function_to_call(**func_args)
+                        except TypeError:
+                            # The model sometimes sends a slightly different
+                            # argument shape than expected (e.g. a different
+                            # key name). Fall back to using whatever single
+                            # value it provided as the query.
+                            fallback_value = (
+                                func_args.get("query")
+                                or next(iter(func_args.values()), "")
+                            )
+                            result = function_to_call(str(fallback_value))
                     st.session_state.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
