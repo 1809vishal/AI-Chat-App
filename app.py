@@ -20,6 +20,8 @@ For deployment instructions, see the DEPLOY.md file in this folder.
 """
 
 import os
+import base64
+import json
 import streamlit as st
 from groq import Groq
 from sentence_transformers import SentenceTransformer
@@ -27,11 +29,19 @@ import chromadb
 from ddgs import DDGS
 
 CHAT_MODEL = "openai/gpt-oss-120b"  # larger model = more reliable tool calling than the 20b version
+VISION_MODEL = "qwen/qwen3.6-27b"  # for understanding photos (Groq's current vision model -- a preview model, may change)
+WHISPER_MODEL = "whisper-large-v3-turbo"  # for transcribing spoken questions
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"  # small, free, runs in-process
 DOCS_FOLDER = "policies"
 TOP_K = 2
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
+
+LANGUAGES = [
+    "Auto-detect (reply in the same language as the question)",
+    "English", "Hindi", "Gujarati", "Spanish", "French", "German",
+    "Arabic", "Chinese", "Japanese", "Portuguese", "Russian",
+]
 
 st.set_page_config(page_title="My AI Assistant", page_icon="🤖")
 
@@ -100,6 +110,40 @@ available_functions = {
     "search_company_policies": search_company_policies,
 }
 
+
+def analyze_image(image_bytes: bytes, mime_type: str, user_question: str) -> str:
+    """Send a photo to Groq's vision model and get back a description or
+    an answer to the user's question about it."""
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    prompt_text = user_question.strip() or "Describe what's in this image in detail."
+    try:
+        response = groq_client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_image}"}},
+                ],
+            }],
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"(Couldn't analyze the image: {e})"
+
+
+def transcribe_audio(audio_file) -> str:
+    """Send a recorded voice message to Groq's Whisper model and get back
+    the transcribed text."""
+    try:
+        transcription = groq_client.audio.transcriptions.create(
+            file=(audio_file.name, audio_file.getvalue()),
+            model=WHISPER_MODEL,
+        )
+        return transcription.text
+    except Exception as e:
+        return f"(Couldn't transcribe the audio: {e})"
+
 # Groq (OpenAI-compatible) needs explicit JSON-schema tool definitions,
 # unlike Ollama which could read them straight from Python docstrings.
 TOOLS = [
@@ -129,9 +173,8 @@ TOOLS = [
     },
 ]
 
-SYSTEM_PROMPT = {
-    "role": "system",
-    "content": (
+def build_system_prompt(language: str) -> dict:
+    base = (
         "You are a helpful company assistant with two tools available:\n"
         "1. search_web - for current events, live data, or anything that "
         "could have changed since your training.\n"
@@ -140,26 +183,75 @@ SYSTEM_PROMPT = {
         "Use the right tool based on what the question is actually about. "
         "If a question needs neither, answer directly. Never guess at "
         "company policy specifics -- always use search_company_policies."
-    ),
-}
+    )
+    if language and not language.startswith("Auto-detect"):
+        base += f"\n\nAlways respond in {language}, regardless of what language the question is in."
+    else:
+        base += "\n\nRespond in the same language the user's question is written in."
+    return {"role": "system", "content": base}
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [SYSTEM_PROMPT]
 
 st.title("🤖 My AI Assistant")
-st.caption("Live web search + company policy RAG — hosted, available 24/7")
+st.caption("Live web search + company policy RAG + photos + voice — hosted, available 24/7")
+
+with st.sidebar:
+    st.subheader("Settings")
+    selected_language = st.selectbox("Response language", LANGUAGES, index=0)
+
+if "messages" not in st.session_state:
+    st.session_state.messages = [build_system_prompt(selected_language)]
+else:
+    # Keep the system prompt in sync if the user changes the language mid-chat
+    st.session_state.messages[0] = build_system_prompt(selected_language)
 
 for msg in st.session_state.messages[1:]:
     if msg["role"] in ("user", "assistant") and msg.get("content"):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-user_input = st.chat_input("Ask me anything...")
+prompt = st.chat_input(
+    "Ask, attach a photo, or tap the mic to speak...",
+    accept_file=True,
+    file_type=["png", "jpg", "jpeg"],
+    accept_audio=True,
+)
 
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+if prompt:
+    user_text = (prompt.text or "").strip()
+    extra_context_parts = []
+
+    # --- Handle a recorded voice message ---
+    if prompt.audio:
+        with st.spinner("Transcribing your voice message..."):
+            transcribed = transcribe_audio(prompt.audio)
+        user_text = (user_text + " " + transcribed).strip()
+
+    # --- Handle an attached photo ---
+    image_bytes = None
+    image_mime = None
+    if prompt.files:
+        image_file = prompt.files[0]
+        image_bytes = image_file.getvalue()
+        image_mime = image_file.type or "image/jpeg"
+        with st.spinner("Looking at your photo..."):
+            image_description = analyze_image(image_bytes, image_mime, user_text)
+        extra_context_parts.append(f"[Image content]: {image_description}")
+
+    combined_text = user_text
+    if extra_context_parts:
+        combined_text = (combined_text + "\n\n" + "\n\n".join(extra_context_parts)).strip()
+
+    if not combined_text:
+        combined_text = "(No question was provided.)"
+
+    st.session_state.messages.append({"role": "user", "content": combined_text})
     with st.chat_message("user"):
-        st.markdown(user_input)
+        if user_text:
+            st.markdown(user_text)
+        if prompt.audio:
+            st.caption("🎤 Voice message (transcribed above)")
+        if image_bytes:
+            st.image(image_bytes, width=250)
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
@@ -213,7 +305,6 @@ if user_input:
 
                     for tool_call in message.tool_calls:
                         func_name = tool_call.function.name
-                        import json
                         try:
                             func_args = json.loads(tool_call.function.arguments)
                         except json.JSONDecodeError:
