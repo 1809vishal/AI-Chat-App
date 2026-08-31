@@ -62,6 +62,19 @@ https://your-app-name.streamlit.app
 Open this from your phone, another computer, or send it to a
 teammate — it works independently of your laptop being on.
 
+## Keeping your app from sleeping (free tier)
+Streamlit Community Cloud puts free apps to sleep after **12 hours with
+no visitors** — this is a platform policy, not something fixable in
+your code. When someone visits a sleeping app, they see a "Yes, get
+this app back up!" button, and it takes a minute or two to wake up.
+
+**Free workaround**: use [UptimeRobot](https://uptimerobot.com) (free)
+to ping your app's URL every 5 minutes automatically. Since that's far
+more frequent than the 12-hour sleep threshold, your app should never
+go to sleep as long as the monitor is running. Sign up, add your app's
+URL as an "HTTP(s)" monitor with a 5-minute interval, and you're done —
+no code changes needed.
+
 ## Notes on this setup
 - **Free tier limits**: Groq's free tier allows up to 14,400 requests/day
   on this model — more than enough for personal or small-team use.
